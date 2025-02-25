@@ -2,6 +2,7 @@ import os
 import requests
 from loguru import logger
 
+import random
 
 import click
 import time
@@ -15,12 +16,50 @@ from collections import namedtuple
 logger.remove(0)
 
 
+def humanize_bytes(num_bytes):
+    """
+    Convert a number of bytes into a human-readable format (e.g., KB, MB, GB).
+
+    :param num_bytes: Number of bytes
+    :return: Human-readable string
+    """
+    if num_bytes < 1024:
+        return f"{num_bytes} bytes"
+    elif num_bytes < 1024**2:
+        return f"{num_bytes / 1024:.2f} Kb"
+    elif num_bytes < 1024**3:
+        return f"{num_bytes / 1024 ** 2:.2f} Mb"
+    elif num_bytes < 1024**4:
+        return f"{num_bytes / 1024 ** 3:.2f} Gb"
+    else:
+        return f"{num_bytes / 1024 ** 4:.2f} Tb"
+
+
+def longest_common_prefix(strs):
+    if not strs:
+        return ""
+
+    # Start with the first string as the prefix
+    prefix = strs[0]
+
+    # Compare the prefix with each string in the list
+    for string in strs[1:]:
+        # Reduce the prefix length until it matches the start of the string
+        while string[: len(prefix)] != prefix:
+            prefix = prefix[:-1]
+            if not prefix:
+                return ""
+
+    return prefix
+
+
 def sleep(seconds):
     if seconds:
         time_slept = 0
-        for _ in track(range(int(seconds)), description="Sleeping"):
-            time.sleep(1)
-            time_slept += 1
+        seconds_times_ten = int(seconds * 10)
+        for _ in track(range(seconds_times_ten), description="Sleeping"):
+            time.sleep(0.01)
+            time_slept += 0.01
             if time_slept >= seconds:
                 break
 
@@ -197,7 +236,7 @@ class Downloader:
         path = parsed.path.lstrip("/")
         old_path = path
         for prefix in self.prefixes_to_remove:
-            path = path.replace(prefix, "")
+            path = path.replace(prefix.lstrip("/"), "")
         local_path = os.path.join(self.download_dir, path.lstrip("/"))
         logger.debug(
             f"Old path: {old_path} new path: {path}; Local path: {local_path}; URL: {url}; Prefixes: {self.prefixes_to_remove}"
@@ -215,11 +254,16 @@ class Downloader:
         # r.raise_for_status()
         status_code = r.status_code
         rate_limits = get_rate_limits(r.headers)
-        logger.debug("RATE LIMITS: ", rate_limits, type(rate_limits))
+        logger.debug(f"RATE LIMITS: {rate_limits}")
         success = status_code >= 200 and status_code < 300
         logger.debug(
             f"SUCCESS: {success}; STATUS CODE: {status_code}; URL: <<<<{url}>>>>"
         )
+        content_length = r.headers.get("Content-Length")
+        sz = "Unknown"
+        if content_length:
+            sz = humanize_bytes(int(content_length))
+        logger.debug(f"Content length: {sz}")
         download_result = DowloadResult(url, success, status_code, rate_limits, False)
         if success:
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -233,7 +277,7 @@ class Downloader:
                 logger.error(f"Error writing to {local_path}: {e}")
                 self.number_of_failed_downloads += 1
                 return download_result
-            logger.info(f"Downloaded {url} to {local_path}")
+            logger.info(f"Downloaded {url} to {local_path}; Content size: {sz}")
             self.last_download_time = time.time()
             self.number_of_successful_downloads += 1
         else:
@@ -265,18 +309,24 @@ class Downloader:
     def maybe_wait(self, rate_limits, success, attempt_number):
         if success:
             if rate_limits.retry_after.n > 0:
-                logger.info(f"Waiting for {rate_limits.retry_after.n:f2} seconds")
                 sleep(rate_limits.retry_after.n)
-            elif rate_limits.quota == 0:
+            elif (
+                rate_limits.quota.n == 0
+                and rate_limits.quota.state == RateLimitState.KNOWN
+            ):
                 sleep(2**attempt_number)
-            elif rate_limits.quota.n > 0 and rate_limits.rate_limit.n > 0:
-                # eg 300 left in a 1000/hr limit, reset time in (300/1000) * 3600 seconds
-                reset_time = rate_limits.quota.n / rate_limits.rate_limit.n * 3600
-                time_to_wait = time_to_wait_given_remaining_quota(
-                    rate_limits.quota.n, reset_time
-                )
-                logger.info(f"Waiting for {time_to_wait} seconds")
-                sleep(time_to_wait)
+            elif rate_limits.quota.state == RateLimitState.UNKNOWN:
+                pass  # don't know what to do here
+            else:
+                pass  # don't know what to do here; might be unreachable
+            # elif rate_limits.quota.n > 0 and rate_limits.rate_limit.n > 0:
+            #     # eg 300 left in a 1000/hr limit, reset time in (300/1000) * 3600 seconds
+            #     reset_time = rate_limits.quota.n / rate_limits.rate_limit.n * 3600
+            #     time_to_wait = time_to_wait_given_remaining_quota(
+            #         rate_limits.quota.n, reset_time
+            #     )
+            #     logger.info(f"Waiting for {time_to_wait} seconds")
+            #     sleep(time_to_wait)
         if not success:
             if rate_limits.retry_after.n > 0:
                 logger.info(f"Waiting for {rate_limits.retry_after.n} seconds")
@@ -304,6 +354,16 @@ class Downloader:
     help="Prefixes to remove from the URL path when saving the file.",
 )
 @click.option(
+    "--auto-remove-prefix",
+    is_flag=True,
+    help="Remove the longest common prefix from the URL paths",
+)
+@click.option(
+    "--randomize",
+    is_flag=True,
+    help="Randomize the order of the URLs",
+)
+@click.option(
     "--log-level",
     default="INFO",
     help="Logging level.",
@@ -313,11 +373,27 @@ class Downloader:
     default=10,
     help="Maximum number of retries on request failures",
 )
-def cli(url_file, download_dir, prefixes_to_remove, log_level, max_tries):
+def cli(
+    url_file,
+    download_dir,
+    prefixes_to_remove,
+    auto_remove_prefix,
+    randomize,
+    log_level,
+    max_tries,
+):
     logger.add(sys.stdout, level=log_level.upper())
-
+    prefixes_to_remove = list(prefixes_to_remove)
     with open(url_file, "r") as f:
         urls = [url.strip() for url in f.readlines()]
+    if randomize:
+        random.shuffle(urls)
+    if auto_remove_prefix:
+        longest_prefix = longest_common_prefix(
+            [urlparse(url).path for url in urls if url]
+        )
+        prefixes_to_remove.append(longest_prefix)
+        logger.info(f"Auto-removing prefix: {longest_prefix}")
     downloader = Downloader(urls, download_dir, prefixes_to_remove, max_tries=max_tries)
     downloader.download_all()
     logger.info(f"Number of existing files: {downloader.number_of_existing_files}")
