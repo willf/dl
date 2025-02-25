@@ -11,9 +11,12 @@ from rich.progress import track
 import sys
 import enum
 import re
-from collections import namedtuple
+from dataclasses import dataclass
+
 
 logger.remove(0)
+
+MAX_WAIT_TIME = 3600  # seconds, 1 hour
 
 
 def humanize_bytes(num_bytes):
@@ -127,23 +130,66 @@ def find_key_matching(headers, regex):
     return None
 
 
-class RateLimitPair(namedtuple("RateLimitPair", ["n", "state"])):
-    def __str__(self):
-        return f"{self.n} ({self.state})"
+@dataclass
+class RateLimitPair:
+    n: int
+    state: RateLimitState
 
 
-class RateLimit(namedtuple("RateLimit", ["quota", "rate_limit", "retry_after"])):
-    def __str__(self):
-        return f"Quota: {self.quota}, Rate Limit: {self.rate_limit}, Retry After: {self.retry_after}"
+@dataclass
+class RateLimits:
+    remaining: RateLimitPair
+    rate_limit: RateLimitPair
+    retry_after: RateLimitPair
+    reset_after: RateLimitPair
 
 
-class DowloadResult(
-    namedtuple(
-        "DownloadResult", ["url", "success", "status_code", "rate_limits", "skip"]
-    )
-):
-    def __str__(self):
-        return f"URL: {self.url}, Success: {self.success}, Status Code: {self.status_code}, Rate Limits: {self.rate_limits}, skip: {self.skip}"
+@dataclass
+class DownloadResult:
+    url: str
+    success: bool
+    status_code: int
+    rate_limits: RateLimits
+    skip: bool
+    attempt_number: int = 0
+
+    def wait_time_policy(self):
+        # if for some reason we are skipping this item, we do not need to wait
+        if self.skip:
+            return 0
+        # if we have a retry-after header, we should wait that amount of time
+        # but perhaps not more than the MAX_WAIT_TIME
+        if (
+            self.rate_limits.retry_after.n > 0
+            and self.rate_limits.retry_after.state == RateLimitState.KNOWN
+        ):
+            return min(self.rate_limits.retry_after.n, MAX_WAIT_TIME)
+        ## If we have both a RateLimitRemaining and RateLimitReset header, we
+        ## can calculate how long to wait. But we need to check if the
+        ## RateLimitReset is a Unix epoch time or a duration in seconds
+        if (
+            self.rate_limits.remaining.n > 0
+            and self.rate_limits.remaining.state == RateLimitState.KNOWN
+            and self.rate_limits.reset_after.n > 0
+            and self.rate_limits.reset_after.state == RateLimitState.KNOWN
+        ):
+            if self.rate_limits.reset_after.n > 1000000000:
+                duration = self.rate_limits.reset_after.n - time.time
+            else:
+                duration = self.rate_limits.reset_after.n
+            # we can only do n calls in duration seconds, so we should wait
+            # duration / n seconds
+            return duration / self.rate_limits.remaining.n
+        ## if the status is 429 (and we don't have any info as above),
+        ## we should wait 2^attempt_number seconds
+        if self.status_code == 429:
+            return 2**self.attempt
+        ## if we don't know what to do, and we are at attempt number > 0, we
+        ## should wait 2^attempt_number seconds
+        if self.attempt_number > 0:
+            return 2**self.attempt_number
+        ## if we know *nothing* then don't wait
+        return 0
 
 
 def get_quota_remaining(headers):
@@ -194,15 +240,33 @@ def get_retry_after(headers):
     return RateLimitPair(0, RateLimitState.UNKNOWN)
 
 
+def get_ratelimit_reset(headers):
+    """
+    > get_ratelimit_reset({"X-Rate-Limit-Reset": "100"})
+    (100, RateLimitState.KNOWN)
+    > get_ratelimit_reset({"X-Rate-Limit-Reset": "0"})
+    (0, RateLimitState.KNOWN)
+    > get_ratelimit_reset({})
+    (0, RateLimitState.UNKNOWN)
+    """
+    regex = re.compile(r"(X-|)Rate-?Limit-Reset", re.IGNORECASE)
+    key = find_key_matching(headers, regex)
+    if key:
+        return RateLimitPair(int(headers[key]), RateLimitState.KNOWN)
+    return RateLimitPair(0, RateLimitState.UNKNOWN)
+
+
 def get_rate_limits(headers):
     quota_remaining = get_quota_remaining(headers)
     rate_limit = get_rate_limit(headers)
     retry_after = get_retry_after(headers)
-    return RateLimit(quota_remaining, rate_limit, retry_after)
+    reset_after = get_ratelimit_reset(headers)
+    return RateLimits(quota_remaining, rate_limit, retry_after, reset_after)
 
 
 def blank_rate_limits():
-    return RateLimit(
+    return RateLimits(
+        RateLimitPair(0, RateLimitState.UNKNOWN),
         RateLimitPair(0, RateLimitState.UNKNOWN),
         RateLimitPair(0, RateLimitState.UNKNOWN),
         RateLimitPair(0, RateLimitState.UNKNOWN),
@@ -243,28 +307,27 @@ class Downloader:
         )
         if not is_valid_filename(local_path):
             logger.error(f"Invalid filename: {local_path}")
-            return DowloadResult(url, False, 0, blank_rate_limits(), True)
+            return DownloadResult(url, False, 0, blank_rate_limits(), True)
         if os.path.exists(local_path):
             logger.info(f"{local_path} already exists, skipping.")
             self.number_of_existing_files += 1
-            return DowloadResult(url, True, 200, blank_rate_limits(), True)
+            return DownloadResult(url, True, 200, blank_rate_limits(), True)
         # OK, let's try to download the file
         self.last_request_time = time.time()
         r = requests.get(url, stream=True)
         # r.raise_for_status()
         status_code = r.status_code
+        logger.trace(f"Headers: {r.headers}")
         rate_limits = get_rate_limits(r.headers)
         logger.debug(f"RATE LIMITS: {rate_limits}")
         success = status_code >= 200 and status_code < 300
-        logger.debug(
-            f"SUCCESS: {success}; STATUS CODE: {status_code}; URL: <<<<{url}>>>>"
-        )
+        logger.debug(f"SUCCESS: {success}; STATUS CODE: {status_code}; URL: {url}")
         content_length = r.headers.get("Content-Length")
         sz = "Unknown"
         if content_length:
             sz = humanize_bytes(int(content_length))
         logger.debug(f"Content length: {sz}")
-        download_result = DowloadResult(url, success, status_code, rate_limits, False)
+        download_result = DownloadResult(url, success, status_code, rate_limits, False)
         if success:
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             # if we fail to write the content, well, let's just fail
@@ -292,47 +355,22 @@ class Downloader:
             logger.info(
                 f"Downloading {i}/{number_of_urls} ({percent_done:.2f}%): {url} ..."
             )
+            result = None
             for attempt_number in range(self.max_tries):
                 if attempt_number > 0:
                     logger.info(
                         f"Attempt number {attempt_number + 1} to download {url}"
                     )
                 result = self.download_file(url)
-                if result.skip:
+                sleep_time = result.wait_time_policy()
+                if sleep_time > 0:
+                    sleep(sleep_time)
+                if result.success or result.skip:
                     break
-                if not result.success:
-                    logger.error(f"Failed to download {url}, result: {result}")
-                self.maybe_wait(result.rate_limits, result.success, attempt_number + 1)
-                if result.success:
-                    break
-
-    def maybe_wait(self, rate_limits, success, attempt_number):
-        if success:
-            if rate_limits.retry_after.n > 0:
-                sleep(rate_limits.retry_after.n)
-            elif (
-                rate_limits.quota.n == 0
-                and rate_limits.quota.state == RateLimitState.KNOWN
-            ):
-                sleep(2**attempt_number)
-            elif rate_limits.quota.state == RateLimitState.UNKNOWN:
-                pass  # don't know what to do here
-            else:
-                pass  # don't know what to do here; might be unreachable
-            # elif rate_limits.quota.n > 0 and rate_limits.rate_limit.n > 0:
-            #     # eg 300 left in a 1000/hr limit, reset time in (300/1000) * 3600 seconds
-            #     reset_time = rate_limits.quota.n / rate_limits.rate_limit.n * 3600
-            #     time_to_wait = time_to_wait_given_remaining_quota(
-            #         rate_limits.quota.n, reset_time
-            #     )
-            #     logger.info(f"Waiting for {time_to_wait} seconds")
-            #     sleep(time_to_wait)
-        if not success:
-            if rate_limits.retry_after.n > 0:
-                logger.info(f"Waiting for {rate_limits.retry_after.n} seconds")
-                sleep(rate_limits.retry_after.n)
-            else:
-                sleep(2**attempt_number)
+            if not (result or result.success) and not result.skip:
+                logger.error(
+                    f"Failed to download {url} after {self.max_tries} attempts"
+                )
 
 
 @click.command()
