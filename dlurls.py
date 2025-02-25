@@ -314,7 +314,12 @@ class Downloader:
             return DownloadResult(url, True, 200, blank_rate_limits(), True)
         # OK, let's try to download the file
         self.last_request_time = time.time()
-        r = requests.get(url, stream=True)
+        try:
+            r = requests.get(url, stream=True)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            logger.error(f"Request failed: {e}")
+            return DownloadResult(url, False, 0, blank_rate_limits(), False)
+
         # r.raise_for_status()
         status_code = r.status_code
         logger.trace(f"Headers: {r.headers}")
