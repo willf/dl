@@ -399,7 +399,7 @@ class Downloader:
 )
 @click.option(
     "--download-dir",
-    type=click.Path(file_okay=False, dir_okay=True),
+    type=click.Path(dir_okay=True),
     default="/tmp/data",
     help="Directory to save downloads.",
 )

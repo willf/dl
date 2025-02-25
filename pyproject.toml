@@ -1,7 +1,7 @@
 [project]
-name = "epa-cam"
+name = "dl"
 version = "0.1.0"
-description = "Add your description here"
+description = "Bulk download files from the internet, with lots of tenacity."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
