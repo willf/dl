@@ -17,6 +17,7 @@ from dataclasses import dataclass
 logger.remove(0)
 
 MAX_WAIT_TIME = 3600  # seconds, 1 hour
+CONNECTION_ERROR = -1  # magic number for connection error
 
 
 def humanize_bytes(num_bytes):
@@ -180,10 +181,13 @@ class DownloadResult:
             # we can only do n calls in duration seconds, so we should wait
             # duration / n seconds
             return duration / self.rate_limits.remaining.n
-        ## if the status is 429 (and we don't have any info as above),
+        ## if the status is 429, a server problem, or a connection problem
         ## we should wait 2^attempt_number seconds
-        if self.status_code == 429:
-            return 2**self.attempt
+        if self.status_code in [429, 503, CONNECTION_ERROR]:
+            logger.info(
+                f"Status code: {self.status_code}; attempt number: {self.attempt_number}"
+            )
+            return 2**self.attempt_number
         ## if we don't know what to do, and we are at attempt number > 0, we
         ## should wait 2^attempt_number seconds
         if self.attempt_number > 0:
@@ -291,7 +295,7 @@ class Downloader:
         self.number_of_existing_files = 0
         self.max_tries = max_tries
 
-    def download_file(self, url):
+    def download_file(self, url, attempt_number):
         url = url.strip()
         parsed = is_valid_url(url)
         if not parsed:
@@ -307,20 +311,26 @@ class Downloader:
         )
         if not is_valid_filename(local_path):
             logger.error(f"Invalid filename: {local_path}")
-            return DownloadResult(url, False, 0, blank_rate_limits(), True)
+            return DownloadResult(
+                url, False, 0, blank_rate_limits(), True, attempt_number
+            )
         if os.path.exists(local_path):
             logger.info(f"{local_path} already exists, skipping.")
             self.number_of_existing_files += 1
-            return DownloadResult(url, True, 200, blank_rate_limits(), True)
+            return DownloadResult(
+                url, True, 200, blank_rate_limits(), True, attempt_number
+            )
         # OK, let's try to download the file
         self.last_request_time = time.time()
         try:
             r = requests.get(url, stream=True)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             logger.error(f"Request failed: {e}")
-            return DownloadResult(url, False, 0, blank_rate_limits(), False)
+            self.number_of_failed_downloads += 1
+            return DownloadResult(
+                url, False, CONNECTION_ERROR, blank_rate_limits(), False, attempt_number
+            )
 
-        # r.raise_for_status()
         status_code = r.status_code
         logger.trace(f"Headers: {r.headers}")
         rate_limits = get_rate_limits(r.headers)
@@ -332,7 +342,9 @@ class Downloader:
         if content_length:
             sz = humanize_bytes(int(content_length))
         logger.debug(f"Content length: {sz}")
-        download_result = DownloadResult(url, success, status_code, rate_limits, False)
+        download_result = DownloadResult(
+            url, success, status_code, rate_limits, False, attempt_number
+        )
         if success:
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             # if we fail to write the content, well, let's just fail
@@ -366,7 +378,7 @@ class Downloader:
                     logger.info(
                         f"Attempt number {attempt_number + 1} to download {url}"
                     )
-                result = self.download_file(url)
+                result = self.download_file(url, attempt_number + 1)
                 sleep_time = result.wait_time_policy()
                 if sleep_time > 0:
                     sleep(sleep_time)
@@ -439,11 +451,14 @@ def cli(
         logger.info(f"Auto-removing prefix: {longest_prefix}")
     downloader = Downloader(urls, download_dir, prefixes_to_remove, max_tries=max_tries)
     downloader.download_all()
+    logger.info(f"Download complete; processed {len(urls)} URLs")
     logger.info(f"Number of existing files: {downloader.number_of_existing_files}")
     logger.info(
         f"Number of successful downloads: {downloader.number_of_successful_downloads}"
     )
-    logger.info(f"Number of failed downloads: {downloader.number_of_failed_downloads}")
+    logger.info(
+        f"Number of failed download attempts: {downloader.number_of_failed_downloads}"
+    )
 
 
 if __name__ == "__main__":
