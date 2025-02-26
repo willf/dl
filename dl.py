@@ -424,6 +424,11 @@ class Downloader:
     help="Randomize the order of the URLs",
 )
 @click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False),
+    help="Path to a file to log output.",
+)
+@click.option(
     "--log-level",
     default="INFO",
     help="Logging level.",
@@ -447,11 +452,14 @@ def cli(
     regex,
     reverse,
     randomize,
+    log_file,
     log_level,
     max_tries,
     dry_run,
 ):
     logger.add(sys.stdout, level=log_level.upper())
+    if log_file:
+        logger.add(log_file, level=log_level.upper())
     prefixes_to_remove = list(prefixes_to_remove)
     with open(url_file, "r") as f:
         urls = [url.strip() for url in f.readlines()]

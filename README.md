@@ -22,6 +22,7 @@ Options:
   --log-level TEXT           Logging level.
   --max-tries INTEGER        Maximum number of retries on request failures
   --version                  Show the version and exit.
+  --log-file PATH            Path to a file to save logs.
   --dry-run                  If set, do not actually download the files, just
                              log what would be done.
   --help                     Show this message and exit.
