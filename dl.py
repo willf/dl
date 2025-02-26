@@ -428,6 +428,12 @@ class Downloader:
     default=10,
     help="Maximum number of retries on request failures",
 )
+@click.version_option(version="1.0.0")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="If set, do not actually download the files, just log what would be done.",
+)
 def cli(
     url_file,
     download_dir,
@@ -436,6 +442,7 @@ def cli(
     randomize,
     log_level,
     max_tries,
+    dry_run,
 ):
     logger.add(sys.stdout, level=log_level.upper())
     prefixes_to_remove = list(prefixes_to_remove)
@@ -449,6 +456,10 @@ def cli(
         )
         prefixes_to_remove.append(longest_prefix)
         logger.info(f"Auto-removing prefix: {longest_prefix}")
+    if dry_run:
+        logger.info("Dry run enabled; not downloading files.")
+        logger.info(f"Would download {len(urls)} URLs to {download_dir}")
+        return
     downloader = Downloader(urls, download_dir, prefixes_to_remove, max_tries=max_tries)
     downloader.download_all()
     logger.info(f"Download complete; processed {len(urls)} URLs")
