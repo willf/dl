@@ -101,22 +101,18 @@ def is_valid_url(url):
     return None
 
 
-def is_valid_filename(path):
+def is_file_with_extension(path):
     """
-    > is_valid_filename("john")
+    > is_file_with_extension("john")
     False
-    > is_valid_filename("john.txt")
+    > is_file_with_extension("john.txt")
     True
-    > is_valid_filename("john.txt/")
+    > is_file_with_extension("john.txt/")
     False
-    > is_valid_filename("/some/dir/john.txt")
+    > is_file_with_extension("/some/dir/john.txt")
     True
     """
     return all(os.path.splitext(os.path.basename(path)))
-
-
-class DownloadError(Exception):
-    pass
 
 
 class RateLimitState(enum.Enum):
@@ -309,7 +305,7 @@ class Downloader:
         logger.debug(
             f"Old path: {old_path} new path: {path}; Local path: {local_path}; URL: {url}; Prefixes: {self.prefixes_to_remove}"
         )
-        if not is_valid_filename(local_path):
+        if not is_file_with_extension(local_path):
             logger.error(f"Invalid filename: {local_path}")
             return DownloadResult(
                 url, False, 0, blank_rate_limits(), True, attempt_number
