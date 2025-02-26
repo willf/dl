@@ -15,6 +15,9 @@ Options:
                              the file.
   --auto-remove-prefix       Remove the longest common prefix from the URL
                              paths
+  --regex TEXT               Regular expression to match URLs to download.
+  --reverse                  Reverse the regex match, i.e., download URLs that
+                             do not match the regex.
   --randomize                Randomize the order of the URLs
   --log-level TEXT           Logging level.
   --max-tries INTEGER        Maximum number of retries on request failures

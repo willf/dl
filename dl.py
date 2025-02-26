@@ -410,6 +410,15 @@ class Downloader:
     help="Remove the longest common prefix from the URL paths",
 )
 @click.option(
+    "--regex",
+    help="Regular expression to match URLs to download.",
+)
+@click.option(
+    "--reverse",
+    is_flag=True,
+    help="Reverse the regex match, i.e., download URLs that do not match the regex.",
+)
+@click.option(
     "--randomize",
     is_flag=True,
     help="Randomize the order of the URLs",
@@ -435,6 +444,8 @@ def cli(
     download_dir,
     prefixes_to_remove,
     auto_remove_prefix,
+    regex,
+    reverse,
     randomize,
     log_level,
     max_tries,
@@ -444,6 +455,21 @@ def cli(
     prefixes_to_remove = list(prefixes_to_remove)
     with open(url_file, "r") as f:
         urls = [url.strip() for url in f.readlines()]
+
+    if regex:
+        pattern = re.compile(regex)
+        old_len = len(urls)
+        if reverse:
+            urls = [url for url in urls if not pattern.search(url)]
+            logger.info(
+                f"Filtered URLs from {old_len} to {len(urls)} which do not match regex: {regex}"
+            )
+        else:
+            urls = [url for url in urls if pattern.search(url)]
+            logger.info(
+                f"Filtered URLs from {old_len} to {len(urls)} which match regex: {regex}"
+            )
+
     if randomize:
         random.shuffle(urls)
     if auto_remove_prefix:
