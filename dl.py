@@ -389,14 +389,13 @@ class Downloader:
 @click.command()
 @click.option(
     "--url-file",
-    type=click.Path(exists=True),
-    required=True,
-    help="Path to a file containing URLs.",
+    default=None,
+    help="Path to a file containing URLs (defaults to stdin).",
 )
 @click.option(
     "--download-dir",
     type=click.Path(dir_okay=True),
-    default="dowloads",
+    default="download",
     show_default=True,
     help="Directory to save downloads.",
 )
@@ -427,16 +426,20 @@ class Downloader:
 @click.option(
     "--log-file",
     type=click.Path(dir_okay=False),
+    default=None,
+    show_default=True,
     help="Path to a file to log output.",
 )
 @click.option(
     "--log-level",
     default="INFO",
+    show_default=True,
     help="Logging level.",
 )
 @click.option(
     "--max-tries",
     default=10,
+    show_default=True,
     help="Maximum number of retries on request failures",
 )
 @click.version_option(version="1.0.0")
@@ -462,8 +465,13 @@ def cli(
     if log_file:
         logger.add(log_file, level=log_level.upper())
     prefixes_to_remove = list(prefixes_to_remove)
-    with open(url_file, "r") as f:
-        urls = [url.strip() for url in f.readlines()]
+    if not url_file:
+        logger.info("Reading URLs from standard input.")
+        urls = [url.strip() for url in sys.stdin.readlines()]
+    else:
+        logger.info(f"Reading URLs from file: {url_file}")
+        with open(url_file, "r") as f:
+            urls = [url.strip() for url in f.readlines()]
 
     # strip empty URLs and lines starting with #
     urls = [url for url in urls if url and not url.startswith("#")]
