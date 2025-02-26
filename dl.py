@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 logger.remove(0)
 
-MAX_WAIT_TIME = 3600  # seconds, 1 hour
+MAX_WAIT_TIME = 2**20  # seconds, about 292 hours
 CONNECTION_ERROR = -1  # magic number for connection error
 
 
@@ -396,7 +396,8 @@ class Downloader:
 @click.option(
     "--download-dir",
     type=click.Path(dir_okay=True),
-    default="/tmp/data",
+    default="dowloads",
+    show_default=True,
     help="Directory to save downloads.",
 )
 @click.option(
@@ -463,6 +464,9 @@ def cli(
     prefixes_to_remove = list(prefixes_to_remove)
     with open(url_file, "r") as f:
         urls = [url.strip() for url in f.readlines()]
+
+    # strip empty URLs and lines starting with #
+    urls = [url for url in urls if url and not url.startswith("#")]
 
     if regex:
         pattern = re.compile(regex)
